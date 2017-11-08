@@ -14,11 +14,13 @@
  modified 7 Nov 2017
  */
 
+#include <avr/wdt.h>
 #include <SPI.h>
 #include <Ethernet.h>
 
-// Digital pin to use as output.
-int pin = 0;
+// Digital pin to use as output as well as LED to turn on
+int outpin = 0;
+int ledpin = 13;
 bool switchOn = false;
 
 // Set the MAC address to what is printed on the shield
@@ -34,7 +36,7 @@ EthernetServer server(80);
 enum states {
   GET,
   WAITFOREND,
-  RESPONSE
+  DONE
 } state;
 
 // Start of GET line for all available requests,
@@ -51,7 +53,100 @@ enum requests {
   NONE
 } request;
 
+// Turn on/off the output
+void turn_on(bool on) {
+  digitalWrite(outpin, on);
+  digitalWrite(ledpin, on);
+}
+
+void update_state(EthernetClient client) {
+  char c = client.read();
+  //Serial.write(c);
+  
+  switch (state) {
+    case GET: {
+      static int linecnt = 0;
+      
+      // Increment counter if it matches one of the supported requests.
+      request = NONE;
+      int num_request_types = sizeof(REQUEST_LINES) / sizeof(char*);
+      for (int i = 0; i < num_request_types; i++) {
+        if (c == REQUEST_LINES[i][linecnt]) {
+          linecnt++;
+          request = (requests)i;
+          break;
+        }
+      }
+
+      // If at the end of the request strings, update state
+      if (linecnt >= REQUEST_LEN) {
+        linecnt = 0;
+        state = WAITFOREND;
+      }
+      break;
+    }
+    case WAITFOREND: {
+      static char last[3] = {0};
+      if (last[2] == '\r' && last[1] == '\n' && last[0] == '\r' && c == '\n') {
+        // Send response
+        switch (request) {
+          case INDEX:
+            client.println("HTTP/1.1 200 OK");
+            client.println("Content-Type: text/html");
+            client.println("Connection: close");
+            client.println("Refresh: 5");
+            client.println();
+            client.println("<!DOCTYPE HTML><html>");
+            if (switchOn) {
+              client.println("Switch ON");
+            } else {
+              client.println("Switch OFF");
+            }
+            client.println("</html>");
+            Serial.println("sent webpage");
+            break;
+          case ON:
+            client.println("HTTP/1.1 200 OK");
+            client.println("Content-Type: text/html");
+            client.println("Connection: close");
+            client.println();
+            client.println("<!DOCTYPE HTML><html>Switch ON</html>");
+            Serial.println("turning on");
+            switchOn = true;
+            break;
+          case OFF:
+            client.println("HTTP/1.1 200 OK");
+            client.println("Content-Type: text/html");
+            client.println("Connection: close");
+            client.println();
+            client.println("<!DOCTYPE HTML><html>Switch OFF</html>");
+            Serial.println("turning off");
+            switchOn = false;
+            break;
+          case NONE:
+            client.println("HTTP/1.1 400 Bad Request");
+            client.println("Content-Type: text/html");
+            client.println("Connection: close");
+            client.println();
+            client.println("<!DOCTYPE HTML><html>Invalid request.</html>");
+            Serial.println("invalid request received");
+            break;
+        }
+        state = GET;
+      }
+      last[2] = last[1];
+      last[1] = last[0];
+      last[0] = c;
+      break;
+    }
+    case DONE: break;
+  }
+}
+
 void setup() {
+  // Initialize I/O
+  turn_on(false);
+  
   // Open serial communications and wait for port to open:
   Serial.begin(9600);
   while (!Serial) {
@@ -63,77 +158,20 @@ void setup() {
   server.begin();
   Serial.print("server is at ");
   Serial.println(Ethernet.localIP());
+  
+  // Enable watchdog
+  //wdt_enable(WDTO_1S);
 }
 
 void loop() {
-  int linecnt = 0;
-  
   // Listen for incoming clients
   EthernetClient client = server.available();
   if (client) {
     Serial.println("new client");
 
-    state = GET;
     while (client.connected()) {
       if (client.available()) {
-        char c = client.read();
-        Serial.write(c);
-
-        switch (state) {
-          case GET:
-          {
-            int num_requests = sizeof(REQUEST_LINES) / sizeof(char*);
-
-            // Increment counter if it matches one of the supported requests.
-            request = NONE;
-            for (int i = 0; i < num_requests; i++) {
-              if (c == REQUEST_LINES[i][linecnt]) {
-                linecnt++;
-                request = (requests)i;
-                break;
-              }
-            }
-
-            // If no matching request line was found reject the request.
-            if (request == NONE) {
-              state = WAITFOREND;
-              Serial.println("invalid request");
-              break;
-            }
-
-            // If at the end of the request strings, update state
-            if (linecnt >= REQUEST_LEN-1) {
-              //Serial.printf("Request %d\n", (int)request);
-            }
-            break;
-          }
-          case WAITFOREND:
-            
-            break;
-          case RESPONSE:
-            
-            break;
-        }
-        // If you've gotten to the end of the line (received a newline
-        // character) and the line is blank, the http request has ended,
-        // so you can send a reply
-//        if (c == '\n' && currentLineIsBlank) {
-//          // Send a standard http response header
-//          client.println("HTTP/1.1 200 OK");
-//          client.println("Content-Type: text/html");
-//          client.println("Connection: close");  // The connection will be closed after completion of the response
-//          client.println();
-//          client.println("<!DOCTYPE HTML><html>");
-//          if (switchOn) {
-//            client.println("Switch ON");
-//          } else {
-//            client.println("Switch OFF");
-//          }
-//          client.println("</html>");
-//          break;
-//        }
-
-        
+        update_state(client);
       }
     }
     // Give the web browser time to receive the data
@@ -144,6 +182,9 @@ void loop() {
   }
 
   // Write the output
-  digitalWrite(pin, switchOn);
+  turn_on(switchOn);
+  
+  // Reset watchdog timer
+  //wdt_reset();
 }
 
