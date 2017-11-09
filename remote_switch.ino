@@ -19,9 +19,8 @@
 #include <Ethernet.h>
 
 // Digital pin to use as output as well as LED to turn on
-int outpin = 0;
-int ledpin = 13;
-bool switchOn = false;
+int outpin_ = 9;
+bool on_ = false;
 
 // Set the MAC address to what is printed on the shield
 // Set the IP address to 10.0.0.4
@@ -33,158 +32,100 @@ IPAddress ip(10, 0, 0, 4);
 // Initialize the Ethernet server library at port 80
 EthernetServer server(80);
 
-enum states {
-  GET,
-  WAITFOREND,
-  DONE
-} state;
+const char RESP200OFF[] PROGMEM =
+  "HTTP/1.1 200 OK\r\n"
+  "Content-Type: text/html\r\n"
+  "Connection: close\r\n\r\n"
+  "<!DOCTYPE HTML><html>"
+  "Switch OFF</html>\r\n";
+const char RESP200ON[] PROGMEM =
+  "HTTP/1.1 200 OK\r\n"
+  "Content-Type: text/html\r\n"
+  "Connection: close\r\n\r\n"
+  "<!DOCTYPE HTML><html>"
+  "Switch ON</html>\r\n";
+const char RESP405[] PROGMEM =
+  "HTTP/1.1 405 Method Not Allowed\r\n"
+  "Content-Type: text/html\r\n"
+  "Connection: close\r\n\r\n"
+  "<!DOCTYPE HTML><html>Only GET requests supported."
+  "</html>\r\n";
+PGM_P const RESPONSES[] PROGMEM = {RESP200OFF, RESP200ON, RESP405};
 
-// Start of GET line for all available requests,
-// these strings must be the same length
-char* GET_INDEX = "GET / HT";
-char* GET_ON    = "GET /on ";
-char* GET_OFF   = "GET /off";
-char* REQUEST_LINES[] = {GET_INDEX, GET_ON, GET_OFF};
-int REQUEST_LEN = strlen(GET_INDEX);
-enum requests {
-  INDEX,
-  ON,
-  OFF,
-  NONE
-} request;
+// Buffer to hold request and response
+char buf_[256];
 
-// Turn on/off the output
-void turn_on(bool on) {
-  digitalWrite(outpin, on);
-  digitalWrite(ledpin, on);
-}
+// GET path for all available requests, must end in space
+const char GET_ON[]       = "/on ";
+const char GET_OFF[]      = "/off ";
 
-void update_state(EthernetClient client) {
-  char c = client.read();
-  //Serial.write(c);
-  
-  switch (state) {
-    case GET: {
-      static int linecnt = 0;
-      
-      // Increment counter if it matches one of the supported requests.
-      request = NONE;
-      int num_request_types = sizeof(REQUEST_LINES) / sizeof(char*);
-      for (int i = 0; i < num_request_types; i++) {
-        if (c == REQUEST_LINES[i][linecnt]) {
-          linecnt++;
-          request = (requests)i;
-          break;
-        }
-      }
-
-      // If at the end of the request strings, update state
-      if (linecnt >= REQUEST_LEN) {
-        linecnt = 0;
-        state = WAITFOREND;
-      }
-      break;
-    }
-    case WAITFOREND: {
-      static char last[3] = {0};
-      if (last[2] == '\r' && last[1] == '\n' && last[0] == '\r' && c == '\n') {
-        // Send response
-        switch (request) {
-          case INDEX:
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-Type: text/html");
-            client.println("Connection: close");
-            client.println("Refresh: 5");
-            client.println();
-            client.println("<!DOCTYPE HTML><html>");
-            if (switchOn) {
-              client.println("Switch ON");
-            } else {
-              client.println("Switch OFF");
-            }
-            client.println("</html>");
-            Serial.println("sent webpage");
-            break;
-          case ON:
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-Type: text/html");
-            client.println("Connection: close");
-            client.println();
-            client.println("<!DOCTYPE HTML><html>Switch ON</html>");
-            Serial.println("turning on");
-            switchOn = true;
-            break;
-          case OFF:
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-Type: text/html");
-            client.println("Connection: close");
-            client.println();
-            client.println("<!DOCTYPE HTML><html>Switch OFF</html>");
-            Serial.println("turning off");
-            switchOn = false;
-            break;
-          case NONE:
-            client.println("HTTP/1.1 400 Bad Request");
-            client.println("Content-Type: text/html");
-            client.println("Connection: close");
-            client.println();
-            client.println("<!DOCTYPE HTML><html>Invalid request.</html>");
-            Serial.println("invalid request received");
-            break;
-        }
-        state = GET;
-      }
-      last[2] = last[1];
-      last[1] = last[0];
-      last[0] = c;
-      break;
-    }
-    case DONE: break;
+size_t response(char* buf, bool* on) {
+  char* bufptr = buf;
+  if (strncmp(bufptr, "GET ", 4)) {
+    // Not a GET request, method not supported
+    Serial.println(F("invalid request received"));
+    strcpy(buf, RESP405);
+    return size_t(RESP405);
   }
+  bufptr += 4;  // Skip past the "GET "
+
+  // Check for /on or /off and turn on/off output
+  if (!strncmp(bufptr, GET_OFF, strlen(GET_OFF))) {
+    *on = false;
+  } else if (!strncmp(bufptr, GET_ON, strlen(GET_ON))) {
+    *on = true;
+  }
+
+  int response = *on ? 1 : 0;
+  PGM_P resptr = (PGM_P)pgm_read_word(&RESPONSES[response]);
+  strcpy_P(buf, resptr);
+  return strlen_P(resptr);
 }
 
 void setup() {
   // Initialize I/O
-  turn_on(false);
+  pinMode(outpin_, OUTPUT);
+  digitalWrite(outpin_, on_);
   
   // Open serial communications and wait for port to open:
   Serial.begin(9600);
-  while (!Serial) {
-    ; // Wait for serial port to connect. Needed for Leonardo only
-  }
+  while (!Serial);
 
   // Start the Ethernet connection and the server:
   Ethernet.begin(mac, ip);
   server.begin();
-  Serial.print("server is at ");
+  Serial.print(F("server is at "));
   Serial.println(Ethernet.localIP());
   
   // Enable watchdog
-  //wdt_enable(WDTO_1S);
+  wdt_enable(WDTO_1S);
 }
 
 void loop() {
   // Listen for incoming clients
   EthernetClient client = server.available();
   if (client) {
-    Serial.println("new client");
-
+    //Serial.println("new client");
+    char* bufptr = buf_;
     while (client.connected()) {
-      if (client.available()) {
-        update_state(client);
+      if(client.available()) {
+        char c = client.read();
+        if (c == '\n') {
+          size_t len = response(buf_, &on_);
+          digitalWrite(outpin_, on_); // Write the output pin
+          client.write(buf_, len);    // Send response packet
+          delay(1);                   // Give the web browser time to receive the data
+          client.stop();              // Close the connection
+          //Serial.println("client disconnected");
+        } else {
+          *bufptr = c;
+          bufptr++;
+        }
       }
     }
-    // Give the web browser time to receive the data
-    delay(1);
-    // Close the connection:
-    client.stop();
-    Serial.println("client disconnected");
   }
-
-  // Write the output
-  turn_on(switchOn);
   
   // Reset watchdog timer
-  //wdt_reset();
+  wdt_reset();
 }
 
